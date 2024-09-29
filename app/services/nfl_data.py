@@ -1,11 +1,10 @@
-from fastapi import FastAPI, HTTPException
+from http.client import HTTPException
 import nfl_data_py as nfl
 import pandas as pd
 import numpy as np
 from datetime import datetime
 import logging
-
-app = FastAPI()
+from fastapi import HTTPException
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -51,18 +50,31 @@ def get_season_games(team_abbr):
 
     return season_games['game_id'].tolist()
 
-def get_qb_performance_for_game(pbp_data, game_id, team_abbr):
-    game_plays = pbp_data[pbp_data['game_id'] == game_id]
+def get_qb_performance_for_game(pbp_data, season_game_ids, team_abbr):
+    # Check if play-by-play data is empty
+    if not season_game_ids:
+        logger.error(f"No season games found for team {team_abbr}")
+        return {}  # Return an empty object instead of raising an exception
+
+    most_recent_game_id = season_game_ids[-1]
+    print(most_recent_game_id)
+    logger.info(f"Most recent game ID from season games: {most_recent_game_id}")
+    if pbp_data.empty:
+        logger.error(f"No plays found for game {most_recent_game_id}")
+        return {}  # Return an empty object instead of raising an exception
+
+    game_plays = pbp_data[pbp_data['game_id'] == most_recent_game_id]
     if game_plays.empty:
-        logger.error(f"No plays found for game {game_id}")
-        raise HTTPException(status_code=204, detail=f"No plays found for game {game_id}")
+        logger.error(f"No plays found for game {most_recent_game_id}")
+        most_recent_game_id = season_game_ids[-2]
+        game_plays = pbp_data[pbp_data['game_id'] == most_recent_game_id]
 
     qb_plays = filter_qb_plays(game_plays, team_abbr)
     if qb_plays.empty:
         logger.error(f"No QB plays found for team {team_abbr}")
-        raise HTTPException(status_code=204, detail=f"No QB plays found for team {team_abbr}")
+        return {}  # Return an empty object instead of raising an exception
 
-    return calculate_qb_performance(qb_plays, game_plays, team_abbr, game_id)
+    return calculate_qb_performance(qb_plays, game_plays, team_abbr, most_recent_game_id)
 
 def get_qb_performance_for_season(pbp_data, season_game_ids, team_abbr):
     season_plays = pbp_data[pbp_data['game_id'].isin(season_game_ids)]
@@ -97,15 +109,15 @@ def calculate_qb_performance(qb_plays, all_plays, team_abbr, game_id):
     return {
         "qb_name": qb_name,
         "game_id": game_id,
-        "epa": float(qb_plays['epa'].sum()),
-        "epa_per_play": float(qb_plays['epa'].mean()),
-        "cpoe": float(qb_plays['cpoe'].mean()),
-        "completion_percentage": (completions / attempts * 100) if attempts > 0 else 0,
-        "touchdowns": int(passing_tds),
-        "interceptions": int(interceptions),
-        "attempts": int(attempts),
+        "epa": round(float(qb_plays['epa'].sum()), 3),
+        "epa_per_play": round(float(qb_plays['epa'].mean()), 3),
+        "cpoe": round(float(qb_plays['cpoe'].mean()), 3),
+        "completion_percentage": round((completions / attempts * 100) if attempts > 0 else 0, 1),
+        "touchdowns": round(float(passing_tds), 0),
+        "interceptions": round(float(interceptions), 0),
+        "attempts": round(float(attempts), 0),
         "completions": int(completions),
-        "any_a": float(any_a)
+        "any_a": round(float(any_a), 3)
     }
 
 def get_average_qb_performance(pbp_data):
@@ -130,68 +142,30 @@ def get_average_qb_performance(pbp_data):
         'sack': 'sum'
     }).mean()
 
-    total_yards_lost = -qualified_qb_plays[qualified_qb_plays['sack'] == 1]['yards_gained'].sum()
-    total_attempts = qualified_qb_plays['pass_attempt'].sum()
-    total_sacks = qualified_qb_plays['sack'].sum()
-    total_passing_yards = qualified_qb_plays['passing_yards'].sum()
-    total_passing_tds = qualified_qb_plays['pass_touchdown'].sum()
-    total_interceptions = qualified_qb_plays['interception'].sum()
-
+    total_yards_lost = round(-qualified_qb_plays[qualified_qb_plays['sack'] == 1]['yards_gained'].sum(), 0)
+    total_attempts = round(qualified_qb_plays['pass_attempt'].sum(), 0)
+    total_sacks = round(qualified_qb_plays['sack'].sum(), 0)
+    total_passing_yards = round(qualified_qb_plays['passing_yards'].sum(), 0)
+    total_passing_tds = round(qualified_qb_plays['pass_touchdown'].sum(), 0)
+    total_interceptions = round(qualified_qb_plays['interception'].sum(), 0)
+    
+    print(total_attempts)
+    print(total_sacks)
+    print(total_passing_yards)
+    print(total_passing_tds)
+    print(total_interceptions)
+    print(total_yards_lost)
+    
     qualified_any_a = (total_passing_yards + 20 * total_passing_tds - 45 * total_interceptions - total_yards_lost) / (total_attempts + total_sacks)
 
     return {
-        "epa": float(avg_stats['epa']),
-        "epa_per_play": float(avg_stats['epa']),
-        "cpoe": float(avg_stats['cpoe']),
-        "completion_percentage": float((avg_stats['complete_pass'] / avg_stats['pass_attempt']) * 100),
-        "touchdowns": float(avg_stats['pass_touchdown']),
-        "interceptions": float(avg_stats['interception']),
-        "attempts": float(avg_stats['pass_attempt']),
-        "completions": float(avg_stats['complete_pass']),
-        "any_a": float(qualified_any_a)
-    }
-
-@app.get("/pbp-columns")
-async def get_pbp_columns():
-    try:
-        # Import a small sample of play-by-play data
-        pbp_data = nfl.import_pbp_data([2024], include_participation=False)
-        
-        if pbp_data.empty:
-            logger.error("Play-by-play data is empty")
-            raise HTTPException(status_code=204, detail="Play-by-play data is empty")
-        
-        # Get the column names
-        columns = pbp_data.columns.tolist()
-        play_types = pbp_data['play_type'].unique().tolist()
-
-        return {"columns": columns, "play_types": play_types}
-    
-    except Exception as e:
-        logger.error(f"Error fetching play-by-play columns: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/qb-performance/{team_abbr}")
-async def get_qb_performance(team_abbr: str):
-    try:
-        game_id = get_most_recent_game(team_abbr)
-        season_game_ids = get_season_games(team_abbr)
-    except ValueError as e:
-        logger.error(f"Error fetching game data: {e}")
-        raise HTTPException(status_code=204, detail=str(e))
-
-    pbp_data = nfl.import_pbp_data([2024], include_participation=False)
-
-    if pbp_data.empty:
-        logger.error("Play-by-play data is empty")
-        raise HTTPException(status_code=204, detail="Play-by-play data is empty")
-
-    qb_performance_recent = get_qb_performance_for_game(pbp_data, game_id, team_abbr)
-    qb_performance_season = get_qb_performance_for_season(pbp_data, season_game_ids, team_abbr)
-    avg_qb_performance = get_average_qb_performance(pbp_data)
-
-    return {
-        "most_recent_game": qb_performance_recent,
-        "season": qb_performance_season,
-        "league_average": avg_qb_performance
+        "epa": round(float(avg_stats['epa']), 3),
+        "epa_per_play": round(float(avg_stats['epa']), 3),
+        "cpoe": round(float(avg_stats['cpoe']), 3),
+        "completion_percentage": round((avg_stats['complete_pass'] / avg_stats['pass_attempt']) * 100, 1),
+        "touchdowns": round(float(avg_stats['pass_touchdown']), 0),
+        "interceptions": round(float(avg_stats['interception']), 0),
+        "attempts": round(float(avg_stats['pass_attempt']), 0),
+        "completions": round(float(avg_stats['complete_pass']), 0),
+        "any_a": round(float(qualified_any_a), 3)
     }
